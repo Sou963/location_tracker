@@ -1,79 +1,91 @@
 const express = require("express");
-const app = express();
-const port = 3000;
 const path = require("path");
 const bcrypt = require("bcryptjs");
-const auth=require('./auth')
 const { MongoClient } = require("mongodb");
+const auth = require("./auth");
 
+const app = express();
 
-const client = new MongoClient(process.env.MONGODB_URI);
-const dbname = "user_info";
-//middleware
+// ===== MongoDB connection (CACHED) =====
+const uri = process.env.MONGODB_URI;
+let cachedClient = null;
+
+async function getDB() {
+  if (!cachedClient) {
+    const client = new MongoClient(uri);
+    cachedClient = await client.connect();
+    console.log("✅ MongoDB Connected");
+  }
+  return cachedClient.db("user_info");
+}
+
+// ===== Middleware =====
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "../public")));
 
+// ===== Pages =====
 app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "/views/login.html"));
-});
-app.get("/register", (req, res) => {
-  res.sendFile(path.join(__dirname, "/views/reg.html"));
-});
-app.get("/mytracker", (req, res) => {
-  res.sendFile(path.join(__dirname, "/views/track.html"));
+  res.sendFile(path.join(__dirname, "../views/login.html"));
 });
 
-//register user
+app.get("/register", (req, res) => {
+  res.sendFile(path.join(__dirname, "../views/reg.html"));
+});
+
+app.get("/mytracker", (req, res) => {
+  res.sendFile(path.join(__dirname, "../views/track.html"));
+});
+
+// ===== Register =====
 app.post("/register", async (req, res) => {
-  const { name, email, password, confirmPassword } = req.body;
   try {
-    await client.connect();
-    const db = client.db(dbname);
+    const db = await getDB();
     const col = db.collection("information");
-    const existing = await col.findOne({ email });
-    if (existing) {
-      return res.send("email is already existing");
+
+    const { name, email, password, confirmPassword } = req.body;
+
+    if (password !== confirmPassword) {
+      return res.send("Password not matching");
     }
-    else if (password !== confirmPassword) {
-      return res.send("password not matching");
+
+    const exists = await col.findOne({ email });
+    if (exists) {
+      return res.send("Email already exists");
     }
+
     const hash = await bcrypt.hash(password, 10);
-    const insert = await col.insertOne({ name, email, password: hash });
-    if (insert) {
-      res.status(200).sendFile(path.join(__dirname, "/views/login.html"));
-    }
+    await col.insertOne({ name, email, password: hash });
+
+    res.sendFile(path.join(__dirname, "../views/login.html"));
   } catch (err) {
     console.error(err);
     res.status(500).send("Internal Server Error");
-  } 
+  }
 });
-//login user
-app.post('/login',async(req,res)=>{
-    const {email,password}=req.body;
-    try{
-        await client.connect();
-        const db=client.db(dbname);
-        const col=db.collection('information');
-        const user=await col.findOne({email});
-        // const useremail=await col.compare(email,user.email)
 
-        if(!user){
-            return res.send('invalid email or password');
-        }
-        const ismatch=await bcrypt.compare(password,user.password);
-        if(ismatch && user){
-            res.status(200).sendFile(path.join(__dirname,'/views/share.html'));
-        }
-        else{
-            res.send('invalid email or password');
-        }
+// ===== Login =====
+app.post("/login", async (req, res) => {
+  try {
+    const db = await getDB();
+    const col = db.collection("information");
 
-    }catch(err){
-        console.error(err);
-        res.status(500).send('Internal Server Error');
-    }
-})
-app.use('/',auth);
+    const { email, password } = req.body;
+    const user = await col.findOne({ email });
 
-module.exports=app;
+    if (!user) return res.send("Invalid email or password");
+
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.send("Invalid email or password");
+
+    res.sendFile(path.join(__dirname, "../views/share.html"));
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+// ===== OAuth routes =====
+app.use(auth);
+
+module.exports = app;
