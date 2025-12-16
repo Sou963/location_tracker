@@ -1,156 +1,123 @@
 const express = require("express");
 const passport = require("passport");
-const session = require("express-session");
 const path = require("path");
 const { MongoClient } = require("mongodb");
+
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
-const FacebookStrategy = require("passport-facebook").Strategy;
 const GitHubStrategy = require("passport-github2").Strategy;
 
 const auth = express();
 
-// MongoDB setup
+// ===== MongoDB cached connection =====
+const uri = process.env.MONGODB_URI;
+let cachedClient = null;
 
-const client = new MongoClient(process.env.MONGODB_URI);
-const dbName = "user_info";
-let usersCollection;
-
-async function connectDB() {
-  try {
-    await client.connect();
-    usersCollection = client.db(dbName).collection("information");
-    console.log("✅ MongoDB Connected");
-  } catch (err) {
-    console.error(err);
+async function getDB() {
+  if (!cachedClient) {
+    const client = new MongoClient(uri);
+    cachedClient = await client.connect();
+    console.log("✅ MongoDB Connected (auth)");
   }
+  return cachedClient.db("user_info");
 }
-connectDB();
 
-// Express session
-auth.use(
-  session({
-    secret: "yourSecretKey",
-    resave: false,
-    saveUninitialized: false,
-    cookie: { maxAge: 24 * 60 * 60 * 1000 }, // 1 day
-  })
-);
-
+// ===== Passport init (NO session) =====
 auth.use(passport.initialize());
-auth.use(passport.session());
 
-// Serialize/Deserialize
-passport.serializeUser((user, done) => done(null, user));
-passport.deserializeUser((user, done) => done(null, user));
-
-// Save user to MongoDB
-async function saveUser(profile, provider) {
-  const existingUser = await usersCollection.findOne({
-    provider_id: profile.id,
-  });
-  if (!existingUser) {
-    await usersCollection.insertOne({
-      name: profile.displayName,
-      email: profile.emails?.[0]?.value || "No Email",
-      provider,
-      provider_id: profile.id,
-      createdAt: new Date(),
-    });
-    console.log(`✅ New user added from ${provider}`);
-  }
-  return {
-    id: profile.id,
-    displayName: profile.displayName,
-    email: profile.emails?.[0]?.value || "No Email",
-  };
-}
-
-// Strategy callback wrapper
-function strategyCallback(provider) {
-  return async (accessToken, refreshToken, profile, done) => {
-    try {
-      const user = await saveUser(profile, provider);
-      done(null, user);
-    } catch (err) {
-      done(err, null);
-    }
-  };
-}
-
-// Passport Strategies
-
-// Google
+// ===== Google OAuth =====
 passport.use(
   new GoogleStrategy(
     {
-      clientID: "",
-      clientSecret: "",
+      clientID: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
       callbackURL: "/auth/google/callback",
     },
-    strategyCallback("google")
+    async (accessToken, refreshToken, profile, done) => {
+      try {
+        const db = await getDB();
+        const col = db.collection("information");
+
+        const exists = await col.findOne({
+          provider: "google",
+          provider_id: profile.id,
+        });
+
+        if (!exists) {
+          await col.insertOne({
+            name: profile.displayName,
+            email: profile.emails?.[0]?.value || "No Email",
+            provider: "google",
+            provider_id: profile.id,
+            createdAt: new Date(),
+          });
+        }
+
+        done(null, profile);
+      } catch (err) {
+        done(err);
+      }
+    }
   )
 );
 
-// Facebook
-passport.use(
-  new FacebookStrategy(
-    {
-      clientID: "",
-      clientSecret: "",
-      callbackURL: "/auth/facebook/callback",
-      profileFields: ["id", "displayName", "emails"],
-    },
-    strategyCallback("facebook")
-  )
-);
-
-// GitHub
+// ===== GitHub OAuth =====
 passport.use(
   new GitHubStrategy(
     {
-      clientID: "YOUR_GITHUB_CLIENT_ID",
-      clientSecret: "YOUR_GITHUB_CLIENT_SECRET",
+      clientID: process.env.GITHUB_CLIENT_ID,
+      clientSecret: process.env.GITHUB_CLIENT_SECRET,
       callbackURL: "/auth/github/callback",
     },
-    strategyCallback("github")
+    async (accessToken, refreshToken, profile, done) => {
+      try {
+        const db = await getDB();
+        const col = db.collection("information");
+
+        const exists = await col.findOne({
+          provider: "github",
+          provider_id: profile.id,
+        });
+
+        if (!exists) {
+          await col.insertOne({
+            name: profile.displayName,
+            email: profile.emails?.[0]?.value || "No Email",
+            provider: "github",
+            provider_id: profile.id,
+            createdAt: new Date(),
+          });
+        }
+
+        done(null, profile);
+      } catch (err) {
+        done(err);
+      }
+    }
   )
 );
 
-//  success.html
-
-//Routes
-
-// Google
+// ===== Routes =====
 auth.get(
   "/auth/google",
   passport.authenticate("google", { scope: ["profile", "email"] })
 );
+
 auth.get(
   "/auth/google/callback",
-  passport.authenticate("google", { failureRedirect: "/" }),
-  (req, res) => res.sendFile(path.join(__dirname, "/views/share.html"))
+  passport.authenticate("google", { session: false }),
+  (req, res) => {
+    res.sendFile(path.join(__dirname, "../views/share.html"));
+  }
 );
 
-// Facebook
-auth.get(
-  "/auth/facebook",
-  passport.authenticate("facebook", { scope: ["email"] })
-);
-auth.get(
-  "/auth/facebook/callback",
-  passport.authenticate("facebook", { failureRedirect: "/" }),
-  (req, res) => res.sendFile(path.join(__dirname, "/views/share.html"))
-);
+auth.get("/auth/github", passport.authenticate("github"));
 
-// GitHub
-auth.get(
-  "/auth/github",
-  passport.authenticate("github", { scope: ["user:email"] })
-);
 auth.get(
   "/auth/github/callback",
-  passport.authenticate("github", { failureRedirect: "/" }),
-  (req, res) => res.sendFile(successPath)
+  passport.authenticate("github", { session: false }),
+  (req, res) => {
+    res.sendFile(path.join(__dirname, "../views/share.html"));
+  }
 );
 
 module.exports = auth;
